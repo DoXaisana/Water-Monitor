@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": ".."
+		},
+		{
+			"name": "water_monitor",
+			"path": "../water_monitor"
+		}
+	],
+	"settings": {
+		"liveServer.settings.multiRootWorkspaceName": "water_monitor"
+	}
+}

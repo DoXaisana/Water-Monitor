@@ -1,200 +1,109 @@
 import pandas as pd
 import numpy as np
-import tensorflow as tf
-import glob
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from sklearn.preprocessing import MinMaxScaler
 import os
+import glob
 
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler  # Changed from MinMaxScaler
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
-from tensorflow.keras.optimizers.legacy import Adam
+# Load all CSV files in the 'datasets' folder
+data_folder = "datasets"
+all_files = glob.glob(os.path.join(data_folder, "water_usage_*.csv"))
 
+df_list = []
+for file in all_files:
+    df = pd.read_csv(file)
+    df["Datetime"] = pd.to_datetime(df["Date"] + " " + df["Time"])
+    df_list.append(df)
 
-class WaterUsagePrediction:
-    def __init__(self, data_dir="water_usage_data"):
-        self.data_dir = data_dir
-        self.scaler = StandardScaler()  # Using StandardScaler to avoid NaN issues
-        self.model = None
-        self.sequence_length = 48 * 7  # One week of data
+df = pd.concat(df_list, ignore_index=True)
 
-    def load_and_prepare_data(self):
-        """Load all CSV files and prepare data for training."""
-        all_files = glob.glob(os.path.join(self.data_dir, "water_usage_*.csv"))
-        if not all_files:
-            raise ValueError(f"No CSV files found in {self.data_dir}")
+# Aggregate daily water usage
+df_daily = df.groupby(df["Datetime"].dt.date)["Usage Percentage"].sum().reset_index()
+df_daily.rename(columns={"Datetime": "Date", "Usage Percentage": "Daily Usage"}, inplace=True)
+df_daily["Date"] = pd.to_datetime(df_daily["Date"])
 
-        dfs = [pd.read_csv(filename) for filename in all_files]
-        df = pd.concat(dfs, ignore_index=True)
+# Normalize the data
+scaler = MinMaxScaler(feature_range=(0, 1))
+df_daily["Scaled Usage"] = scaler.fit_transform(df_daily[["Daily Usage"]])
 
-        df['DateTime'] = pd.to_datetime(df['Date'] + ' ' + df['Time'])
-        df = df.sort_values('DateTime')
+# Create sequences
+def create_sequences(data, seq_length):
+    sequences, targets = [], []
+    for i in range(len(data) - seq_length):
+        sequences.append(data[i : i + seq_length])
+        targets.append(data[i + seq_length])
+    return np.array(sequences), np.array(targets)
 
-        df['Hour'] = df['DateTime'].dt.hour
-        df['DayOfWeek'] = df['DateTime'].dt.dayofweek
-        df['Month'] = df['DateTime'].dt.month
-        df['IsWeekend'] = df['DayOfWeek'].isin([5, 6]).astype(int)
+sequence_length = 30  # Use past 30 days to predict the next day
+data = df_daily["Scaled Usage"].values
+X, y = create_sequences(data, sequence_length)
 
-        df['IsSpecialEvent'] = df['Special Events'].apply(lambda x: 0 if x == 'Normal day' else 1)
-        df['IsLaoNewYear'] = df['Special Events'].str.contains('Lao New Year').astype(int)
+# Split data into training and validation sets
+split_idx = int(len(X) * 0.8)
+X_train, X_val = X[:split_idx], X[split_idx:]
+y_train, y_val = y[:split_idx], y[split_idx:]
 
-        features = ['Usage Percentage', 'Hour', 'DayOfWeek', 'Month', 'IsWeekend', 'IsSpecialEvent', 'IsLaoNewYear']
-        self.data = df[features].dropna()
+# Convert to PyTorch tensors
+X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
+y_train_tensor = torch.tensor(y_train, dtype=torch.float32)
+X_val_tensor = torch.tensor(X_val, dtype=torch.float32)
+y_val_tensor = torch.tensor(y_val, dtype=torch.float32)
 
-        # Check for invalid values
-        if not np.all(np.isfinite(self.data.values)):
-            raise ValueError("Training data contains NaN or infinite values!")
+# Define LSTM model
+class WaterUsageLSTM(nn.Module):
+    def __init__(self, input_size=1, hidden_size=50, num_layers=2, output_size=1):
+        super(WaterUsageLSTM, self).__init__()
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_size, output_size)
 
-        print(f"Loaded {len(self.data)} valid data points")
-        return self.data
+    def forward(self, x):
+        lstm_out, _ = self.lstm(x)
+        return self.fc(lstm_out[:, -1, :])
 
-    def create_sequences(self, data):
-        """Create sequences for LSTM training with multiple features."""
-        X, y = [], []
-        values = data.values  
+# Instantiate model
+model = WaterUsageLSTM()
 
-        if len(values) <= self.sequence_length:
-            raise ValueError(f"Not enough data points. Need at least {self.sequence_length + 1}")
+# Define loss function and optimizer
+criterion = nn.MSELoss()
+optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-        for i in range(len(values) - self.sequence_length):
-            sequence = values[i:(i + self.sequence_length)]
-            target = values[i + self.sequence_length][0]  
+# Training loop
+epochs = 100
+for epoch in range(epochs):
+    model.train()
+    optimizer.zero_grad()
+    output = model(X_train_tensor.unsqueeze(-1))
+    loss = criterion(output.squeeze(), y_train_tensor)
+    loss.backward()
+    optimizer.step()
+    
+    if (epoch + 1) % 10 == 0:
+        model.eval()
+        with torch.no_grad():
+            val_output = model(X_val_tensor.unsqueeze(-1))
+            val_loss = criterion(val_output.squeeze(), y_val_tensor)
+        print(f"Epoch {epoch+1}/{epochs}, Loss: {loss.item():.4f}, Val Loss: {val_loss.item():.4f}")
 
-            if np.isnan(sequence).any() or np.isnan(target):
-                continue  # Skip sequences with NaNs
+# Save the trained model
+model_folder = "Model"
+os.makedirs(model_folder, exist_ok=True)
+torch.save(model.state_dict(), os.path.join(model_folder, "water_usage_model.pth"))
 
-            X.append(sequence)
-            y.append(target)
+# Predict next 30 days
+model.eval()
+predictions = []
+input_seq = X_val[-1]  # Start from the last known sequence
 
-        if not X:
-            raise ValueError("No valid sequences could be created")
+for _ in range(30):
+    with torch.no_grad():
+        pred = model(torch.tensor(input_seq, dtype=torch.float32).unsqueeze(0).unsqueeze(-1))
+        pred_value = pred.item()
+        predictions.append(pred_value)
+        input_seq = np.roll(input_seq, -1)
+        input_seq[-1] = pred_value
 
-        return np.array(X), np.array(y)
-
-    def build_model(self):
-        """Create LSTM model architecture."""
-        model = Sequential([
-            LSTM(64, activation='tanh', input_shape=(self.sequence_length, 7), return_sequences=True),
-            Dropout(0.2),
-            LSTM(32, activation='tanh'),
-            Dropout(0.2),
-            Dense(16, activation='relu'),
-            Dense(1)
-        ])
-
-        model.compile(optimizer=Adam(learning_rate=0.001), loss='mse', metrics=['mae'])
-        return model
-
-    def train_model(self, epochs=20, batch_size=32):
-        """Train the model with the prepared data."""
-        print("Loading and preparing data...")
-        data = self.load_and_prepare_data()
-
-        scaled_data = self.scaler.fit_transform(data)  
-
-        print("Creating sequences...")
-        X, y = self.create_sequences(pd.DataFrame(scaled_data, columns=data.columns))
-
-        X = X.reshape((X.shape[0], X.shape[1], X.shape[2]))
-
-        print(f"Created {len(X)} sequences for training")
-
-        X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
-
-        print("Building and training model...")
-        self.model = self.build_model()
-
-        history = self.model.fit(
-            X_train, y_train,
-            epochs=epochs,
-            batch_size=batch_size,
-            validation_data=(X_val, y_val),
-            callbacks=[tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)],
-            verbose=1
-        )
-
-        self.save_model()  
-        return history
-
-    def predict_next_month(self, last_month_data):
-        """Predict water usage for the next month."""
-        if self.model is None:
-            raise ValueError("Model needs to be trained first")
-
-        # Ensure we have enough data points
-        if len(last_month_data) < self.sequence_length + 1:
-            print(f"Warning: Not enough data. Need at least {self.sequence_length + 1} points. Using available {len(last_month_data)} points instead.")
-            last_month_data = self.data.tail(self.sequence_length + 1)  # Take from full dataset
-
-        scaled_data = self.scaler.transform(last_month_data)
-
-        X, _ = self.create_sequences(pd.DataFrame(scaled_data, columns=last_month_data.columns))
-
-        if len(X) == 0:
-            raise ValueError("No valid sequences created for prediction!")
-
-        X = X.reshape((X.shape[0], X.shape[1], X.shape[2]))
-
-        scaled_prediction = self.model.predict(X)
-        prediction = self.scaler.inverse_transform(scaled_prediction)
-
-        return prediction.flatten()[-1]  # Return last predicted value
-
-    def evaluate_model(self, test_data):
-        """Evaluate model performance."""
-        if self.model is None:
-            raise ValueError("Model needs to be trained first")
-
-        scaled_data = self.scaler.transform(test_data)
-
-        X, y = self.create_sequences(pd.DataFrame(scaled_data, columns=test_data.columns))
-
-        X = X.reshape((X.shape[0], X.shape[1], X.shape[2]))
-
-        scaled_predictions = self.model.predict(X)
-        predictions = self.scaler.inverse_transform(scaled_predictions)
-
-        mse = mean_squared_error(y, scaled_predictions)
-        mae = mean_absolute_error(y, scaled_predictions)
-        r2 = r2_score(y, scaled_predictions)
-
-        return {'MSE': mse, 'MAE': mae, 'R2': r2, 'RMSE': np.sqrt(mse)}
-
-    def save_model(self, model_path="water_usage_model.h5"):
-        """Save the trained model."""
-        if self.model is None:
-            raise ValueError("Model is not trained yet!")
-        self.model.save(model_path)
-        print(f"Model saved at {model_path}")
-
-    def load_model(self, model_path="water_usage_model.h5"):
-        """Load a previously trained model."""
-        if not os.path.exists(model_path):
-            raise ValueError(f"Model file '{model_path}' not found!")
-        self.model = tf.keras.models.load_model(model_path)
-        print("Model loaded successfully")
-
-
-if __name__ == "__main__":
-    try:
-        predictor = WaterUsagePrediction()
-
-        print("Starting model training...")
-        history = predictor.train_model(epochs=20)
-
-        print("\nPreparing recent data for prediction...")
-        recent_data = predictor.load_and_prepare_data().tail(48 * 7)  # Ensure at least 336 points
-
-        print("\nMaking prediction...")
-        next_month_usage = predictor.predict_next_month(recent_data)
-        print(f"Predicted usage for next month: {next_month_usage:.2f}%")
-
-        print("\nEvaluating model performance...")
-        metrics = predictor.evaluate_model(predictor.data)
-        print("\nModel Performance Metrics:")
-        for metric, value in metrics.items():
-            print(f"{metric}: {value:.4f}")
-
-    except Exception as e:
-        print(f"\nAn error occurred: {str(e)}")
+# Convert predictions back to original scale
+predictions = scaler.inverse_transform(np.array(predictions).reshape(-1, 1)).flatten()
+print("Predicted water usage for next month:", predictions)

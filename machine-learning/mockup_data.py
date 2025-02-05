@@ -4,7 +4,7 @@ import pandas as pd
 import os
 
 class LaosWaterUsageSimulator:
-    def __init__(self, household_size=4, output_dir="water_usage_data"):
+    def __init__(self, household_size=4, output_dir="datasets"):
         self.household_size = household_size
         self.output_dir = output_dir
         # Create output directory if it doesn't exist
@@ -43,7 +43,7 @@ class LaosWaterUsageSimulator:
         
         # Lao New Year (Pi Mai Lao)
         if date.month == 4 and date.day in [13, 14, 15]:
-            events.append(("Lao New Year", 2.0))  # Double water usage during New Year
+            events.append(("Lao New Year", 1.6))  # Double water usage during New Year
         
         # Random events
         if random.random() < 0.05:  # 5% chance of special event
@@ -66,11 +66,11 @@ class LaosWaterUsageSimulator:
         base_usage = {
             # Weekday patterns
             "weekday": {
-                "morning_peak": (5, 9, 40, 60),    # Earlier start for workdays
+                "morning_peak": (5, 9, 30, 45),    # Earlier start for workdays
                 "midday": (9, 12, 10, 20),
                 "lunch": (12, 14, 30, 50),
                 "afternoon": (14, 18, 10, 25),
-                "evening_peak": (18, 22, 50, 80),
+                "evening_peak": (18, 22, 50, 70),
                 "night": (22, 5, 5, 15)
             },
             # Weekend patterns
@@ -79,7 +79,7 @@ class LaosWaterUsageSimulator:
                 "midday": (11, 13, 30, 50),
                 "lunch": (13, 15, 40, 60),
                 "afternoon": (15, 18, 30, 50),
-                "evening_peak": (18, 23, 60, 90),
+                "evening_peak": (18, 23, 60, 80),
                 "night": (23, 7, 5, 15)
             }
         }
@@ -107,7 +107,7 @@ class LaosWaterUsageSimulator:
         # Create start and end dates for the month
         start_date = datetime.date(year, month, 1)
         if month == 12:
-            end_date = datetime.date(year + 1, 1, 1)
+            end_date = datetime.date(year, 1, 1)
         else:
             end_date = datetime.date(year, month + 1, 1)
         
@@ -135,6 +135,14 @@ class LaosWaterUsageSimulator:
                 
                 # Keep within realistic bounds
                 actual_usage = round(max(0, min(actual_usage, 100)), 2)
+
+                if actual_usage == 100:
+                    actual_usage -= random.randint(8,15)
+
+                convert_to_litter = (actual_usage * 1000) / 100
+
+                # Set decimal 2 point
+                convert_to_litter = round(convert_to_litter, 2)
                 
                 # Record any special events for the day
                 event_names = "; ".join([e[0] for e in events]) if events else "Normal day"
@@ -143,22 +151,23 @@ class LaosWaterUsageSimulator:
                     current_date,
                     time,
                     actual_usage,
+                    convert_to_litter,
                     event_names,
                     is_weekend
                 ])
         
         return pd.DataFrame(data, columns=[
-            'Date', 'Time', 'Usage Percentage', 'Special Events', 'Is Weekend'
+            'Date', 'Time', 'Usage Percentage', 'Convert Litter', 'Special Events', 'Is Weekend'
         ])
 
     def generate_yearly_data(self, year):
         """Generate and save data for each month of the year."""
-        for month in range(1, 13):
+        for month in range(1, 5):
             # Generate data for the month
             monthly_data = self.generate_monthly_data(year, month)
             
             # Create filename with year and month
-            filename = f"water_usage_{year - 1}_{month:02d}.csv"
+            filename = f"water_usage_{year}_{month:02d}.csv"
             filepath = os.path.join(self.output_dir, filename)
             
             # Save to CSV
@@ -168,7 +177,7 @@ class LaosWaterUsageSimulator:
 # Example usage
 if __name__ == "__main__":
     # Create simulator instance for a family of 4
-    simulator = LaosWaterUsageSimulator(household_size=4)
+    simulator = LaosWaterUsageSimulator(household_size=3)
     
     # Generate data for the current year
     current_year = datetime.date.today().year
