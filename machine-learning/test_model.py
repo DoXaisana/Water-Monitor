@@ -1,72 +1,99 @@
-import pandas as pd
-import numpy as np
-import torch
-from sklearn.preprocessing import MinMaxScaler
 import os
+import fnmatch
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import statsmodels.api as sm
 
-# Load the trained model
-class WaterUsageLSTM(torch.nn.Module):
-    def __init__(self, input_size=1, hidden_size=50, num_layers=2, output_size=1):
-        super(WaterUsageLSTM, self).__init__()
-        self.lstm = torch.nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
-        self.fc = torch.nn.Linear(hidden_size, output_size)
+def process_and_save_graphs(file_path):
+    # extract year and month from filename
+    filename = os.path.basename(file_path)
+    year_month = filename.split("_")[-1].split(".")[0]  # extract yyyy_mm
+    save_folder = f"graphs/{year_month}/"
+    os.makedirs(save_folder, exist_ok=true)
+    
+    # load the csv file
+    df = pd.read_csv(file_path)
+    df['date'] = pd.to_datetime(df['date'])
+    daily_usage = df.groupby('date')['convert litter'].sum()
+    rolling_avg = daily_usage.rolling(window=7).mean()
+    
+    # 1️⃣ time series plot
+    plt.figure(figsize=(12, 6))
+    plt.plot(daily_usage.index, daily_usage.values, marker='o', linestyle='-', color='b')
+    plt.xlabel("date")
+    plt.ylabel("total water usage (liters)")
+    plt.title(f"time series of daily water usage ({year_month})")
+    plt.xticks(rotation=45)
+    plt.grid()
+    plt.savefig(f"{save_folder}time_series.png")
+    plt.close()
+    
+    # 2️⃣ histogram
+    plt.figure(figsize=(10, 5))
+    sns.histplot(daily_usage, bins=10, kde=true, color="purple")
+    plt.xlabel("total water usage (liters)")
+    plt.ylabel("frequency")
+    plt.title(f"histogram of daily water usage ({year_month})")
+    plt.savefig(f"{save_folder}histogram.png")
+    plt.close()
+    
+    # 3️⃣ box plot
+    plt.figure(figsize=(8, 5))
+    sns.boxplot(y=daily_usage, color="orange")
+    plt.ylabel("total water usage (liters)")
+    plt.title(f"box plot of daily water usage ({year_month})")
+    plt.savefig(f"{save_folder}boxplot.png")
+    plt.close()
+    
+    # 4️⃣ moving average plot
+    plt.figure(figsize=(12, 6))
+    plt.plot(daily_usage.index, daily_usage.values, color='gray', alpha=0.5, label="daily usage")
+    plt.plot(rolling_avg.index, rolling_avg.values, color='red', label="7-day moving average", linewidth=2)
+    plt.xlabel("date")
+    plt.ylabel("total water usage (liters)")
+    plt.title(f"7-day moving average of water usage ({year_month})")
+    plt.legend()
+    plt.xticks(rotation=45)
+    plt.grid()
+    plt.savefig(f"{save_folder}moving_average.png")
+    plt.close()
+    
+    # 5️⃣ autocorrelation plot (only if there is enough data)
+    if len(daily_usage) > 15:
+        fig, ax = plt.subplots(figsize=(10, 5))
+        sm.graphics.tsa.plot_acf(daily_usage, lags=min(15, len(daily_usage) - 1), ax=ax)
+        plt.title(f"autocorrelation plot ({year_month})")
+        plt.savefig(f"{save_folder}autocorrelation.png")
+        plt.close()
+    else:
+        print(f"skipping autocorrelation plot for {year_month} due to insufficient data.")
+    
+    # 6️⃣ bar graph - daily water usage
+    plt.figure(figsize=(12, 6))
+    sns.barplot(x=daily_usage.index, y=daily_usage.values, color='blue')
+    plt.xlabel("Date")
+    plt.ylabel("Total Water Usage (Liters)")
+    plt.title(f"Daily Water Usage Bar Chart ({year_month})")
+    plt.xticks(rotation=45)
+    plt.grid()
+    plt.savefig(f"{save_folder}bar_chart.png")
+    plt.close()
+    
+    # 7️⃣ Average Water Usage for the Month
+    avg_usage = daily_usage.mean()
+    plt.figure(figsize=(6, 4))
+    plt.bar(["Average"], [avg_usage], color='green')
+    plt.ylabel("Water Usage (Liters)")
+    plt.title(f"Average Water Usage in {year_month}: {avg_usage:.2f} Liters")
+    plt.savefig(f"{save_folder}average_usage.png")
+    plt.close()
+    
+    print(f"Graphs saved in {save_folder}")
 
-    def forward(self, x):
-        lstm_out, _ = self.lstm(x)
-        return self.fc(lstm_out[:, -1, :])
-
-# Load the model
-model = WaterUsageLSTM()
-model_path = os.path.join("Model", "water_usage_model.pth")
-model.load_state_dict(torch.load(model_path))
-model.eval()
-
-# Load new CSV file
-file_path = "test_data/water_usage_2025_01.csv"  # Change this to your test file
-df = pd.read_csv(file_path)
-df["Datetime"] = pd.to_datetime(df["Date"] + " " + df["Time"])
-
-# Aggregate daily water usage
-df_daily = df.groupby(df["Datetime"].dt.date)["Usage Percentage"].sum().reset_index()
-df_daily.rename(columns={"Datetime": "Date", "Usage Percentage": "Daily Usage"}, inplace=True)
-df_daily["Date"] = pd.to_datetime(df_daily["Date"])
-
-# Normalize the data using the same scaler
-scaler = MinMaxScaler(feature_range=(0, 1))
-df_daily["Scaled Usage"] = scaler.fit_transform(df_daily[["Daily Usage"]])
-
-# Create sequences for prediction
-def create_sequences(data, seq_length):
-    sequences = []
-    for i in range(len(data) - seq_length):
-        sequences.append(data[i : i + seq_length])
-    return np.array(sequences)
-
-sequence_length = 30  # Use past 30 days
-data = df_daily["Scaled Usage"].values
-
-# Get the last 30 days for prediction
-if len(data) < sequence_length:
-    raise ValueError("Not enough data for prediction. Provide at least 30 days of data.")
-
-input_seq = data[-sequence_length:]
-
-# Predict the next 30 days
-predictions = []
-for _ in range(30):
-    with torch.no_grad():
-        pred = model(torch.tensor(input_seq, dtype=torch.float32).unsqueeze(0).unsqueeze(-1))
-        pred_value = pred.item()
-        predictions.append(pred_value)
-        input_seq = np.roll(input_seq, -1)
-        input_seq[-1] = pred_value
-
-# Convert predictions back to original scale
-predictions = scaler.inverse_transform(np.array(predictions).reshape(-1, 1)).flatten()
-
-# Calculate total predicted water usage for the next month
-total_usage_liters = np.sum(predictions)
-
-# Output predictions
-print("Predicted water usage for the next 30 days (in liters):", predictions)
-print(f"Total predicted water usage for next month: {total_usage_liters:.2f} liters")
+# Process all CSV files in the datasets folder
+datasets_folder = "datasets/"
+os.makedirs("graphs", exist_ok=True)  # Ensure the graphs folder exists
+for file in os.listdir(datasets_folder):
+    if fnmatch.fnmatch(file, "water_usage_*.csv"):
+        process_and_save_graphs(os.path.join(datasets_folder, file))
